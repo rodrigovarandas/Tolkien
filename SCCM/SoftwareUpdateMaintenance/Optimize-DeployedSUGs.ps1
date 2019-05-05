@@ -3,36 +3,35 @@
 .Synopsis
    Optimize-DeployedSUGs
 .DESCRIPTION
-   Script is meant to Optimize Deployed Software Update Groups (SUGs). It is built to ensure updates in SUGs are valid. It also ensures 
-    Deployment Packages only contains valid updates, avoiding misusage of WAN/LAN links. Additionally, script will also remove deployments for test collections,
-    reducing amount of policy to be processed by a SCCM Client.
+   Script is meant to Optimize Deployed Software Update Groups (SUGs). It is built to ensure updates in SUGs are valid and prestine. It also ensures 
+    Deployment Packages only contains valid updates, avoiding misusage of storage, networkbandwidth and distribution jobs. 
+    Additionally, script will also remove deployments for test collections, reducing amount of policy to be processed by a SCCM Client.
    
-   Starting concepts:
-    -> Monthly SUG -> Software Update Groups generated monthly by an Automatic Deployment Rule (ADR) or Administrator (Manual process).
-    -> Aged SUG    -> Software Update Group meant to contain old, but valid, updates. An Aged SUG will contain updates 
-        that are likely either embedded in Organization's WIM or are deployed for such a long time that its deployment is considered complete, but for compliance
-        purposes, requires tracking and compliance. 
+   Starting concepts:    
+    -> Monthly SUG -> Software Update Groups generated monthly by an Automatic Deployment Rule (ADR) or Administrator (Manual process)
+    -> Aged SUG    -> Software Update Group meant to contain old, but valid, updates. An Aged SUG will contain updates that are likely either embedded 
+    in Organization's WIM or are deployed for such a long time that its deployment is considered complete, but for compliance purposes, requires tracking. 
     -> Monthly Deployment Package -> Package meant to host content for recently deployed updates. It is expected to have a High Priority Distribution Setting in SCCM.
     -> Aged Deployment Package -> Package meant to host content for old, but valid updates. It is expected to have a Medium Priority Distribution Setting in SCCM.
    
-   Starting from a set of basic information (INPUT Section below), it will evaluate all Software Update Groups meeting the criteria defined.
+   Starting from a set of basic information (INPUT Section below), this script will evaluate all Software Update Groups meeting the criteria defined.
    
        If an update is expired, it will be removed.
-       If an update is superseded and its Post Date is older than $timeMonthSuperseded, it will be removed.
-       If an update is valid (not superseded nor expired) and its Post Date is older than $timeAgedUpd, it will be removed from Monthly SUG and moved into Aged SUG
-       If an update is missing in a Deployment Package, it will be downloaded.
+       If an update is superseded AND its Post Date is older than $timeMonthSuperseded, it will be removed.
+       If an update is valid (not superseded nor expired) and its Post Date is older than $timeAgedUpd, it will be removed from Monthly SUG and added to Aged SUG
+       If an update is missing in a Deployment Package, it will be downloaded. Into Monthly package if post date is newer than $timeAgedUpd and into Aged Package if older.
        If an update is no longer needed in a Deployment Package, it will be deleted.
-       SUGS to be evaluated must meet $sTemplateName name criteria
+       SUGs to be evaluated must meet $sTemplateName name criteria
        Deployment Packages to be evaluated must meet $sTemplateName criteria
        SUG Deployments older than $timeMonthSuperseded must meet $sFinalCollection criteria to avoid deletion
 
    INPUT: Is managed in the "Script Specific variables" under the "$Scope" switch. If desired, info can be added to switch block and "$Scope" parameter.
-    Such action will script to run with Action "Auto-Run" in a more automated manner.
+    Such action will allow script to run with Action "Auto-Run" in a more automated manner.
         
         => Information to be added in Switch block. If any is missing, Administrator will be required to add during script execution.
         -> SMS Provider Server Name: Server running SMSProvider. Usually, but not always, is the Central Site Server or the Primary Site Server
         -> SCCM SiteCode: Site code in which Actions are targeted to
-        -> TemplateName: <TemplateName> will act as a filter to target only desired SUGS/Deployment Packages/ADRs
+        -> TemplateName: <$sTemplateName> will act as a filter to target SUGS/Deployment Packages/ADRs starting their names with $sTemplateName
             e.g.: TemplateName = "Server-" 
                 Script will look for Deployment packages "Server-Monthly" and "Server-Aged". If they are not found, they will be created.
                 Script will look for SUGS names "Server-ADR YYYY-MM-DD HH:MM" These will be considered "Monthly SUGs"
@@ -46,7 +45,7 @@
             required to reach compliance KPI.
             e.g.: On average, internal KPI (95%) is reached within 20 days after Patch Tuesday -> Set Superseded Threshold to 20
         -> Aged Threshold: How many days, after an update is posted, it takes for an update to find its way into company's load process "WIM".
-            e.g.: New WIMs are generated yearly. Set Aged Threshold to 365
+            e.g.: New WIMs are generated yearly -> Set Aged Threshold to 365
             
     All actions will be recorded in SCCM Server Logs folder under the name "Optimize-DeployedSUGs.log"
 
@@ -183,8 +182,9 @@ Function Start-Log(){
 # Function Start-Log
 
 # Purpose: Checks to see if a log file exists and if not, created it
-#          Also checks log file size
-# Parameters:
+#          Also checks log file size ($iLogFileSize)
+#          Automatically creates EventID 5003 for Script start
+# Parameters: None
 # Returns: None
 # --------------------------------------------------------------------------------------------
     #Check to see if the log folder exists. If not, create it.
@@ -240,6 +240,11 @@ Function Write-Log(){
 #    sMessage - Message to write to the log file
 #    iTabs - Number of tabs to indent text
 #    sFileName - name of the log file (optional. If not provided will default to the $sLogFile in the script
+#    bTxtLog - Writes log to file. Default is $true
+#    bConsole - Writes log to Console. Default is $true
+#    sColor - Text color to be displayed in Console.
+#    bEventLog - Writes log to Event viewer. Default is false
+#    iEventID, sEventLogType, sSource - supporting information to write to event viewer.
 # Returns: None
 # --------------------------------------------------------------------------------------------
     param( 
@@ -296,7 +301,7 @@ Function Write-Log(){
 Function Stop-Log(){
 # --------------------------------------------------------------------------------------------
 # Function EndLog
-# Purpose: Writes the last log information to the log file
+# Purpose: Writes the last log information to the log file. Automatically creates EventID $global:iExitCode
 # Parameters: None
 # Returns: None
 # --------------------------------------------------------------------------------------------
@@ -366,119 +371,25 @@ Function Test-SCCMUpdateAge{
         return $false
     }
 }
-Function Set-Sug{
-# This script is designed to ensure consistent membership of the reporting software update group.
-# In this version it is assumed there is only one reporting software update group.  A reporting software
-# update group is assumed to never be deployed.  Accordingly, The script will first check to see if the 
-# reporting software update group is deployed.  If so the script will display an error and exit.
-# If no error then the updates in every other software update group will be reviewed and added to the
-# reporting software update group.  There is no check to see if the update is already in the reporting
-# software update group because if it is it won't be added twice.
-    Param(
-        [Parameter(Mandatory = $true)]
-        $SiteServerName,
-        [Parameter(Mandatory = $true)]
-        $SiteCode,
-        [Parameter(Mandatory = $true)]
-        $SUGName,
-        [Parameter(Mandatory = $false)]
-        $updInSUG,
-        [Parameter(Mandatory = $false)]
-        $updNotInSUG
-        )
-    #finding updates that are in Rpt SUG but not in any Non-Rpt SUG
-    $updToRemove = @()
-    foreach ($update in $updInSUG){
-        if (!($updNotInSUG -match $update)){
-            $updToRemove += $update
-            Write-Log -iTabs 5 "$update flagged for removal" -bConsole $true       
-        }
-    }
-    #finding updates that aren't in Rpt SUG but are in any Non-Rpt SUG
-    $updToAdd = @()
-    foreach ($update in $updNotInSUG){
-        if (!($updInSUG -match $update)){
-            $updToAdd += $update      
-            Write-Log -iTabs 5 "$update flagged for addition" -bConsole $true        
-        }
-    }
-    #removing extra updates from SUG Rpt
-    if ($updToRemove.Count -gt 0){        
-        Write-Log -iTabs 4 "Removing $($updToRemove.Count) from $SUGName" -bConsole $true         
-        if ($action -like "*Run"){
-            Remove-CMSoftwareUpdateFromGroup -SoftwareUpdateId $updToRemove -SoftwareUpdateGroupName $SUGName -Force #-warningaction silentlycontinue
-        }
-        <#$updcnt=1
-        foreach ($upd in $updToRemove){
-            try{
-                if ($action -like "*Run"){
-                    Remove-CMSoftwareUpdateFromGroup -SoftwareUpdateId $upd -SoftwareUpdateGroupName $SUGName -Force -warningaction silentlycontinue
-                }
-                Write-Log -iTabs 5 "($updcnt/$($updToRemove.Count)) - Removed $upd from $SUGName" -bConsole $true
-                $updcnt++
-            }
-            catch{
-                Write-Log -iTabs 5 "Error while running Remove-CMSoftwareUpdateFromGroup" -bConsole $true -sColor Red                 
-            }                
-        }#>
-        Write-Log -iTabs 5 "$($updToRemove.Count) updates removed from $SUGName" -bConsole $true -sColor Green                              
-    }
-    else{
-        Write-Log -iTabs 4 "No updates to remove from $SUGName" -bConsole $true
-    }
-    #adding updates
-    if ($updToAdd.Count -gt 0){        
-        Write-Log -iTabs 4 "Adding $($updToAdd.Count) to $SUGName" -bConsole $true         
-        if ($action -like "*Run"){
-            Add-CMSoftwareUpdateToGroup -SoftwareUpdateId $updToAdd -SoftwareUpdateGroupName $SUGName -Force #-warningaction silentlycontinue               
-        }
-        <#
-        $updcnt=1
-
-        foreach ($upd in $updToAdd){ 
-            try{       
-                if ($action -like "*Run"){     
-                    Add-CMSoftwareUpdateToGroup -SoftwareUpdateId $upd -SoftwareUpdateGroupName $SUGName -Force -warningaction silentlycontinue               
-                }
-                Write-Log -iTabs 5 "($updcnt/$($updToAdd.Count)) - Added $upd to $SUGName" -bConsole $true
-                $updcnt++
-            }
-            catch{
-                Write-Log -iTabs 5 "Error while running Add-CMSoftwareUpdateToGroup" -bConsole $true -sColor Red 
-            }                
-        }#>
-        Write-Log -iTabs 5 "$($updToAdd.Count) updates added to $SUGName" -bConsole $true -sColor Green                 
-    }
-    else{
-        Write-Log -iTabs 4 "No updates to add to $SUGName" -bConsole $true
-    }
-}
 function Set-SUGPair{
-
+# This function is responsible for making changes to SUGs. Its activity can be divided into 3 scopes: Expired, Supersed and Aged.
+# each scope has a switch ($HandleAgedUpdates, $HandleExpiredUpdates, $HandleSupersedeUpdates).
+# for each scope activated via switch the following info will be required
     Param(
-        [Parameter(Mandatory = $true)]
-        $SiteProviderServerName,
-        [Parameter(Mandatory = $true)]
-        $SiteCode,
-        [Parameter(Mandatory = $true)]
-        $CurrentUpdateGroup,
-        [Parameter(Mandatory = $true)]
-        $CurUpdList,        
-        $PersistentUpdateGroup,        
-        $PerUpdList,
-        [Parameter(Mandatory = $false)]  
-        $HandleAgedUpdates=$false,               
-        $aAgedUpdates, 
-        [Parameter(Mandatory = $false)]
-        $PurgeExpired=$false,        
-        $aExpUpdates,
-        [Parameter(Mandatory = $false)]
-        $PurgeSuperseded=$false,
-        $aSupersededUpdates,
-        [Parameter(Mandatory = $false)]
-        $pkgSusName,
-        [Parameter(Mandatory = $false)]
-        $pkgSusList=$false
+        [Parameter(Mandatory = $true)]  $SiteProviderServerName,    # SCCM SMSProvider ServerName
+        [Parameter(Mandatory = $true)]  $SiteCode,                  # Target SCCM SiteCode
+        [Parameter(Mandatory = $true)]  $CurrentUpdateGroup,        # SUG Name to be evaluated
+        [Parameter(Mandatory = $true)]  $CurUpdList,                # Updates in Current SUG 
+                                        $PersistentUpdateGroup,     # Aged SUG name to be considered (needed if HandleAgedUpdates is true)   
+                                        $PerUpdList,                # Updates in Aged SUG
+        [Parameter(Mandatory = $false)] $HandleAgedUpdates=$false,  # Switch for Aged Updates             
+                                        $aAgedUpdates,              # List of Aged updates from SCCM WMI
+        [Parameter(Mandatory = $false)] $PurgeExpired=$false,       # Switch for Expired Updates
+                                        $aExpUpdates,               # List of Expipred updates from SCCM WMI
+        [Parameter(Mandatory = $false)] $PurgeSuperseded=$false,    # Switch for Superseded Updates
+                                        $aSupersededUpdates,        # List of Superseded updates from SCCM WMI
+        [Parameter(Mandatory = $false)] $pkgSusName,                # Package Name for Aged Updates
+        [Parameter(Mandatory = $false)] $pkgSusList=$false          # Updates in Aged Package
         )
     # If Current and persistent SUGs are equal, exit
     If ($CurrentUpdateGroup -eq $PersistentUpdateGroup){
@@ -634,22 +545,14 @@ function Set-SUGPair{
 }
 function Set-DeploymentPackages {
     Param(
-        [Parameter(Mandatory = $false)]
-        $SiteProviderServerName,
-        [Parameter(Mandatory = $false)]
-        $SiteCode,
-        [Parameter(Mandatory = $false)]
-        $monUpdList,
-        [Parameter(Mandatory = $false)]
-        $susUpdList,
-        [Parameter(Mandatory = $false)]
-        $pkgMonthlyList,
-        [Parameter(Mandatory = $false)]
-        $pkgSustainerList,
-        [Parameter(Mandatory = $false)]
-        $pkgMonthly,
-        [Parameter(Mandatory = $false)]
-        $pkgSustainer
+        [Parameter(Mandatory = $false)] $SiteProviderServerName,
+        [Parameter(Mandatory = $false)] $SiteCode,
+        [Parameter(Mandatory = $false)] $monUpdList,
+        [Parameter(Mandatory = $false)] $susUpdList,
+        [Parameter(Mandatory = $false)] $pkgMonthlyList,
+        [Parameter(Mandatory = $false)] $pkgSustainerList,
+        [Parameter(Mandatory = $false)] $pkgMonthly,
+        [Parameter(Mandatory = $false)] $pkgSustainer
         )   
     # Checkig if all Upd from SUGs are present in at least 1 pkg
     $updatesToDownloadMonth =@()
@@ -790,12 +693,9 @@ function Get-NumUpdInGroups{
 # This script will examine the count of updates in each deployed update group and provide a warning
 # when the number of updates in a given group exceeds 900.
     Param(
-        [Parameter(Mandatory = $true)]
-        $SiteServerName,
-        [Parameter(Mandatory = $true)]
-        $SiteCode,
-        [Parameter(Mandatory = $true)]
-        $sugs
+        [Parameter(Mandatory = $true)] $SiteServerName,
+        [Parameter(Mandatory = $true)] $SiteCode,
+        [Parameter(Mandatory = $true)] $sugs
         )    
     # Loop through each software update group and check the total number of updates in each.    
     ForEach ($sug in $sugs | Sort-Object $sugs.LocalizedDisplayName){        
@@ -834,8 +734,11 @@ function Remove-OldDeployments{
     #list all deployments
         Write-Log -iTabs 4 "Getting all deployments from Software Update Group" -bConsole $true
         $deployments = Get-CMUpdateGroupDeployment | Where-Object {$_.AssignedUpdateGroup -eq "$sugID"}
-        $collectionIDs = Get-CMCollection -Name $CollectiontemplateName* | Select CollectionID
-        foreach ($deployment in $deployments){
+        $collectionIDs = @()
+        foreach ($colTemp in $CollectiontemplateName){
+            $collectionIDs += Get-CMCollection -Name $colTemp* | Select-Object CollectionID
+        }
+            foreach ($deployment in $deployments){
             if ($deployment.TargetCollectionID -notin $collectionIDs.CollectionID){
                 Write-Log -iTabs 5 "$($deployment.AssignmentName) was found as old deployment" -bConsole $true
                 try{
@@ -881,7 +784,7 @@ function Remove-OldDeployments{
         "CAS"{
             $SMSProvider = "sccm01.zlab.varandas.com"            
             $SCCMSite = "CAS"            
-            $TemplateName = "WKS-SecurityUpdates-"    
+            $TemplateName = @("WKS-SecurityUpdates-")
             $finalCollection = "DG4"   
             $timeMonthSuperseded = 45                          
             $timeAgedUpd = 365
@@ -891,7 +794,7 @@ function Remove-OldDeployments{
             $SMSProvider = "sccm01.vlab.varandas.com"
             $SCCMSite = "VAR"
             $TemplateName = "VAR-"            
-            $finalCollection = "All Desktop and Server Clients"      
+            $finalCollection = @("All Desktop and Server Clients")
             $timeMonthSuperseded = 15
             $timeAgedUpd = 270
         }       
@@ -900,7 +803,7 @@ function Remove-OldDeployments{
             $SMSProvider = "sccm01.plab.varandas.com"
             $SCCMSite = "PVA"            
             $TemplateName = "VAR-"               
-            $finalCollection = "All Desktop and Server Clients"    
+            $finalCollection = @("All Desktop and Server Clients","SRV - All Servers")
             $timeMonthSuperseded = 20
             $timeAgedUpd = 180
         }        
@@ -1057,8 +960,7 @@ Function MainSub{
             }
         }
         # Testing SCCM Drive
-        try{
-            $originalLocation = Get-Location
+        try{            
             Write-Log -iTabs 3 "Connecting to SCCM PS Location at $($SCCMSite):\" -bConsole $true -bTxtLog $false        
             Set-Location $SCCMSite":"            
             Write-Log -iTabs 4 "Connected to SCCM PS Location at $($SCCMSite):\" -bConsole $true -sColor Green      
@@ -1174,7 +1076,7 @@ Function MainSub{
                             return $global:iExitCode                            
                         }
                         Write-Log -iTabs 4 "Reloading SUG Array." -bConsole $true      
-                        $sugs = Get-CMSoftwareUpdateGroup | Where-Object {$_.LocalizedDisplayName -like "$TemplateName*"} | Sort LocalizedDisplayName | ConvertTo-Array                                            
+                        $sugs = Get-CMSoftwareUpdateGroup | Where-Object {$_.LocalizedDisplayName -like "$TemplateName*"} | Sort-Object LocalizedDisplayName | ConvertTo-Array                                            
                         $AgedSUG = $sugs | Where-Object {$_.LocalizedDisplayName -eq $TemplateName+"Aged"} #All Aged, but valid Updates                     
                     } 
                 }
@@ -1277,8 +1179,7 @@ Function MainSub{
                 if ($pkgAged.Count -gt 0){                        
                         Write-Log -iTabs 4 "$($pkgAged.Name) was found." -bConsole $true -sColor green                        
                         #Loading CI_IDs from Monthly Package                                        
-                        Write-Log -iTabs 4 "Loading CI_ID List from $($pkgAged.Name)" -bConsole $true
-                        $upCount =0
+                        Write-Log -iTabs 4 "Loading CI_ID List from $($pkgAged.Name)" -bConsole $true                        
                         $PkgID = [System.Convert]::ToString($pkgAged.PackageID)
                         # The query pulls a list of all software updates in the current package.  This query doesn't pull back a clean value so will store it and then manipulate the string to just get the CI information we need a bit later.
                         $Query="SELECT DISTINCT su.* FROM SMS_SoftwareUpdate AS su JOIN SMS_CIToContent AS cc ON  SU.CI_ID = CC.CI_ID JOIN SMS_PackageToContent AS  pc ON pc.ContentID=cc.ContentID  WHERE  pc.PackageID='$PkgID' AND su.IsContentProvisioned=1 ORDER BY su.DateRevised Desc"
@@ -1398,7 +1299,7 @@ Function MainSub{
     Write-Log -itabs 3 "SUG Information - These SUGs will be evaluated/changed by this script." -bConsole $true
     $initNumUpdates=0 
     $initNumSugs=0
-    foreach ($sug in $sugs | where {($sugs.LocalizedDisplayName -like $TemplateName -and $sugs.IsDeployed -eq $true) -or $sugs.LocalizedDisplayName -eq $TemplateName+"Aged"} | Sort-Object $sugs.LocalizedDisplayName){
+    foreach ($sug in $sugs | Where-Object {($sugs.LocalizedDisplayName -like $TemplateName -and $sugs.IsDeployed -eq $true) -or $sugs.LocalizedDisplayName -eq $TemplateName+"Aged"} | Sort-Object $sugs.LocalizedDisplayName){
         #$sugName = $sug.LocalizedDisplayName
         Write-Log -itabs 4 $sug.LocalizedDisplayName -bConsole $true
         $initNumUpdates+=$($sug.Updates).Count
@@ -1456,7 +1357,7 @@ Function MainSub{
         Write-Log -iTabs 2 "2.1 - Review all Monthly SUGs, removing Expired or Superseded KBs. KBs older than 1 year will be moved to Sustainer"-bConsole $true -sColor cyan        
         $timeMonthSuperseded=$(Get-Date).AddDays(-$timeMonthSuperseded)        
         $sugCount=1
-        foreach ($sug in $sugs | where {($sugs.LocalizedDisplayName -like $TemplateName -and $sugs.IsDeployed -eq $true) -or $sugs.LocalizedDisplayName -eq $TemplateName+"Aged"} | Sort-Object $sugs.LocalizedDisplayName){                    
+        foreach ($sug in $sugs | Where-Object {($sugs.LocalizedDisplayName -like $TemplateName -and $sugs.IsDeployed -eq $true) -or $sugs.LocalizedDisplayName -eq $TemplateName+"Aged"} | Sort-Object $sugs.LocalizedDisplayName){                    
             Write-Log -iTabs 3 "($sugCount/$($sugs.Count)) Evaluating SUG: $($sug.LocalizedDisplayName)." -bConsole $true
             #Skiping non-std SUGs
             if($sug.LocalizedDisplayName -eq $($TemplateName+"Aged")){                
