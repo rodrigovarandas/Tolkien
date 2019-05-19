@@ -170,8 +170,12 @@ Function Show-ScriptUsage(){
    
  Revision History: (Date, Author, Version, Changelog)
 		2019/04/07 - Jose Varandas - 1.0			
-           CHANGELOG:
-               -> Script Created
+            CHANGELOG:
+                -> Script Created
+        2019/05/19 - Jose Varandas - 1.1
+            CHANGELOG:
+                -> Fixed bug VAR-Aged can't be found if already created.
+                -> Fixed bug in which the detection of a "Stable" sug was not working
 #>							
 # -------------------------------------------------------------------------------------------- 
 #endregion
@@ -1030,7 +1034,7 @@ Function MainSub{
                 Write-Log -iTabs 3 "Checking if SUGs are present." -bConsole $true
                 #region Gettings SUG Info         
                 try{
-                        $sugs = Get-CMSoftwareUpdateGroup | Where-Object {$_.LocalizedDisplayName -like "$TemplateName*" -and $_.IsDeployed -eq $true} | ConvertTo-Array                                               
+                        $sugs = Get-CMSoftwareUpdateGroup | Where-Object {$_.LocalizedDisplayName -like "$TemplateName*" -and $_.IsDeployed -eq $true -or ($_.LocalizedDisplayName -eq $TemplateName+"Aged")} | ConvertTo-Array                                               
                     }
                 #Error while getting SUG Info
                 catch{                                                                        
@@ -1376,7 +1380,7 @@ Function MainSub{
                 }
             }
             #if SUG is stable (DateCreate is lesser than 365 days and greater than 35 days) remove Expired and Superseded KBs Only. Delete Deployments to initial DGs
-            elseif ($sug.DateCreated -lt $timeMonthSuperseded){                                
+            elseif ($sug.DateCreated -lt $timeMonthSuperseded -and $sug.DateCreated -gt $tSustainerAge){                                
                 Write-Log -iTabs 4 "Removing Expired and Superseeded KBs. Deployments to initial DGs will be deleted."  -bConsole $true
                 try{                
                     Set-SUGPair -SiteProviderServerName $SMSProvider -SiteCode $SCCMSite -CurrentUpdateGroup $sug.LocalizedDisplayName -CurUpdList $sug.Updates -PersistentUpdateGroup $($TemplateName+"Aged") -PerUpdList $AgedSUG.Updates -HandleAgedUpdates $false -aAgedUpdates $AgedUpdates -PurgeExpired $true -aExpUpdates $ExpiredUpdates -PurgeSuperseded $true -aSupersededUpdates $SupersededUpdates -pkgSusName $pkgAged.Name -pkgSusList $pkgAgedList  
@@ -1389,7 +1393,7 @@ Function MainSub{
                 }
             }
             #if SUG is old (DateCreate is greater than 365 days) remove Expired and Superseded KBs. Move valid KBs to Sustainer and Delete SUG
-            elseif ($sug.DateCreated -gt $tSustainerAge){                                
+            elseif ($sug.DateCreated -lt $tSustainerAge){                                
                 Write-Log -iTabs 4 "Removing Expired KBs and Superseeded KBs, Moving year-old Valid KBs into Sustainer SUG. SUG will be deleted" -bConsole $true
                 try{     
                     Set-SUGPair -SiteProviderServerName $SMSProvider -SiteCode $SCCMSite -CurrentUpdateGroup $sug.LocalizedDisplayName -CurUpdList $sug.Updates -PersistentUpdateGroup $($SUGTemplateName+"Sustainer") -PerUpdList $sugSustainer.Updates -HandleAgedUpdates $true -aAgedUpdates $AgedUpdates -PurgeExpired $true -aExpUpdates $ExpiredUpdates -PurgeSuperseded $true -aSupersededUpdates $SupersededUpdates  -pkgSusName $pkgSustainer.Name -pkgSusList $pkgSustainerList               
